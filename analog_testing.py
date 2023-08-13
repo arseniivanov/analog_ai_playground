@@ -28,12 +28,45 @@ import torch
 from torch import nn
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
+from tiling import BitSlicedLinear
 
 # Imports from aihwkit.
 from aihwkit.nn import AnalogLinear, AnalogSequential
 from aihwkit.optim import AnalogSGD
-from aihwkit.simulator.configs import SingleRPUConfig, ConstantStepDevice
+from aihwkit.simulator.configs import SingleRPUConfig, ConstantStepDevice, InferenceRPUConfig, WeightModifierType, WeightClipType, WeightNoiseType
+from aihwkit.inference import PCMLikeNoiseModel, GlobalDriftCompensation
 from aihwkit.simulator.rpu_base import cuda
+
+from torch import Tensor
+from typing import Optional, Type
+from aihwkit.simulator.parameters.base import RPUConfigBase
+
+class QuantizationAwareLinear(AnalogLinear):
+    def __init__(
+            self,
+            in_features: int,
+            out_features: int,
+            bias: bool = True,
+            rpu_config: Optional[RPUConfigBase] = None,
+            tile_module_class: Optional[Type] = None,
+            num_levels: int = 2**9 #2^10 working 10+epochs, lr = 0.215
+    ):
+        super().__init__(in_features, out_features, bias, rpu_config, tile_module_class)
+        self.num_levels = num_levels
+
+    def forward(self, x_input: Tensor) -> Tensor:
+        weight, bias = self.get_weights()
+        self.set_weights(self.quantize(weight), self.quantize(bias) if bias is not None else None)
+        return super().forward(x_input)
+
+    def quantize(self, x: Tensor) -> Tensor:
+        x = (x + 1) / 2
+        x = torch.round(x * (self.num_levels - 1)) / (self.num_levels - 1)
+        # De-normalize to [-1, 1].
+        x = x * 2 - 1
+        return x
+
+
 
 # Check device
 USE_CUDA = 0
@@ -50,9 +83,8 @@ HIDDEN_SIZES = [256, 128]
 OUTPUT_SIZE = 10
 
 # Training parameters.
-EPOCHS = 30
+EPOCHS = 8
 BATCH_SIZE = 64
-
 
 def load_images():
     """Load images for train from the torchvision datasets."""
@@ -78,26 +110,49 @@ def create_analog_network(input_size, hidden_sizes, output_size):
     Returns:
         nn.Module: created analog model
     """
+    rpu_config = InferenceRPUConfig()
+    rpu_config.forward.out_res = -1.0  # Turn off (output) ADC discretization.
+    rpu_config.forward.w_noise_type = WeightNoiseType.ADDITIVE_CONSTANT
+    rpu_config.forward.w_noise = 0.02  # Short-term w-noise.
+
+    rpu_config.clip.type = WeightClipType.FIXED_VALUE
+    rpu_config.clip.fixed_value = 1.0
+    rpu_config.modifier.pdrop = 0.03  # Drop connect.
+    rpu_config.modifier.type = WeightModifierType.ADD_NORMAL  # Fwd/bwd weight noise.
+    rpu_config.modifier.std_dev = 0.1
+    rpu_config.modifier.rel_to_actual_wmax = True
+
+    # Inference noise model.
+    rpu_config.noise_model = PCMLikeNoiseModel(g_max=25.0)
+
+    # drift compensation
+    rpu_config.drift_compensation = GlobalDriftCompensation()
+
+    num_slices = 8
+
     model = AnalogSequential(
-        AnalogLinear(
+        BitSlicedLinear(
             input_size,
             hidden_sizes[0],
-            True,
-            rpu_config=SingleRPUConfig(device=ConstantStepDevice()),
+            num_slices,
+            rpu_config=rpu_config,
+            bias=False,
         ),
         nn.Sigmoid(),
-        AnalogLinear(
+        BitSlicedLinear(
             hidden_sizes[0],
             hidden_sizes[1],
-            True,
-            rpu_config=SingleRPUConfig(device=ConstantStepDevice()),
+            num_slices,
+            rpu_config=rpu_config,
+            bias=False,
         ),
         nn.Sigmoid(),
-        AnalogLinear(
+        BitSlicedLinear(
             hidden_sizes[1],
             output_size,
-            True,
-            rpu_config=SingleRPUConfig(device=ConstantStepDevice()),
+            num_slices,
+            rpu_config=rpu_config,
+            bias=False,
         ),
         nn.LogSoftmax(dim=1),
     )
@@ -109,7 +164,7 @@ def create_analog_network(input_size, hidden_sizes, output_size):
     return model
 
 
-def create_sgd_optimizer(model):
+def create_sgd_optimizer(model, lr):
     """Create the analog-aware optimizer.
 
     Args:
@@ -117,11 +172,13 @@ def create_sgd_optimizer(model):
     Returns:
         nn.Module: optimizer
     """
-    optimizer = AnalogSGD(model.parameters(), lr=0.05)
+    optimizer = AnalogSGD(model.parameters(), lr=lr)
     optimizer.regroup_param_groups(model)
 
     return optimizer
 
+def simulate_quantization(tensor):
+    return torch.round(tensor)
 
 def train(model, train_set):
     """Train the network.
@@ -131,8 +188,9 @@ def train(model, train_set):
         train_set (DataLoader): dataset of elements to use as input for training.
     """
     classifier = nn.NLLLoss()
-    optimizer = create_sgd_optimizer(model)
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
+    lr = 0.5
+    optimizer = create_sgd_optimizer(model, lr)
+    scheduler = StepLR(optimizer, step_size=40, gamma=0.5)
 
     time_init = time()
     for epoch_number in range(EPOCHS):
@@ -151,13 +209,23 @@ def train(model, train_set):
             # Run training (backward propagation).
             loss.backward()
 
+            # Simulate the quantization effects on the gradients
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.data = simulate_quantization(param.grad.data)
+
             # Optimize weights.
             optimizer.step()
+
+            for module in model.modules():
+                if isinstance(module, BitSlicedLinear):
+                    consolidated_weights = module.get_consolidated_weights()
+                    module.transfer_weights(consolidated_weights)
 
             total_loss += loss.item()
 
         print("Epoch {} - Training loss: {:.16f}".format(epoch_number, total_loss / len(train_set)))
-
+        
         # Decay learning rate if needed.
         scheduler.step()
 
@@ -171,26 +239,39 @@ def test_evaluation(model, val_set):
         model (nn.Model): Trained model to be evaluated
         val_set (DataLoader): Validation set to perform the evaluation
     """
-    # Setup counter of images predicted to 0.
-    predicted_ok = 0
-    total_images = 0
-
+    # Save initial state of the model for resetting before each drift operation.
+    initial_state = model.state_dict()
     model.eval()
 
-    for images, labels in val_set:
-        # Predict image.
-        images = images.to(DEVICE)
-        labels = labels.to(DEVICE)
+    for t_inference in [0.0, 1.0, 20.0, 1000.0, 1e5]:
+        # Reset the model to its initial state.
+        model.load_state_dict(initial_state)
+        # Apply drift to the weights.
+        model.drift_analog_weights(t_inference)
 
-        images = images.view(images.shape[0], -1)
-        pred = model(images)
+        # Setup counter of images predicted to 0.
+        predicted_ok = 0
+        total_images = 0
 
-        _, predicted = torch.max(pred.data, 1)
-        total_images += labels.size(0)
-        predicted_ok += (predicted == labels).sum().item()
+        for images, labels in val_set:
+            # Predict image.
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
 
-    print("\nNumber Of Images Tested = {}".format(total_images))
-    print("Model Accuracy = {}".format(predicted_ok / total_images))
+            images = images.view(images.shape[0], -1)
+            pred = model(images)
+
+            _, predicted = torch.max(pred.data, 1)
+            total_images += labels.size(0)
+            predicted_ok += (predicted == labels).sum().item()
+
+        print("Number Of Images Tested at t={} = {}".format(t_inference, total_images))
+        print("Model Accuracy at t={} = {}".format(t_inference, predicted_ok / total_images))
+
+    print("\nFinal Number Of Images Tested = {}".format(total_images))
+    print("Final Model Accuracy = {}".format(predicted_ok / total_images))
+
+
 
 
 def main():
