@@ -47,7 +47,7 @@ OUTPUT_SIZE = 10
 N_BITS = 8
 
 # Training parameters.
-EPOCHS = 8
+EPOCHS = 10
 BATCH_SIZE = 64
 
 def quantize_weights(weights, n_bits):
@@ -85,13 +85,13 @@ def create_analog_network(input_size, hidden_sizes, output_size):
             hidden_sizes[0],
             bias=False,
         ),
-        nn.Sigmoid(),
+        nn.ReLU(),
         Linear(
             hidden_sizes[0],
             hidden_sizes[1],
             bias=False,
         ),
-        nn.Sigmoid(),
+        nn.ReLU(),
         Linear(
             hidden_sizes[1],
             output_size,
@@ -125,7 +125,7 @@ def train(model, train_set):
     classifier = nn.NLLLoss()
     lr = 0.225
     optimizer = create_sgd_optimizer(model, lr)
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
+    scheduler = StepLR(optimizer, step_size=3, gamma=0.3)
 
     time_init = time()
     for epoch_number in range(EPOCHS):
@@ -155,6 +155,8 @@ def train(model, train_set):
             total_loss += loss.item()
 
         print("Epoch {} - Training loss: {:.16f}".format(epoch_number, total_loss / len(train_set)))
+        if total_loss / len(train_set) < 0.1:
+            break
         
         # Decay learning rate if needed.
         scheduler.step()
@@ -170,7 +172,11 @@ def test_evaluation(model, val_set):
         val_set (DataLoader): Validation set to perform the evaluation
     """
     # Save initial state of the model for resetting before each drift operation.
-    initial_state = model.state_dict()
+    # Quantize weights
+    with torch.no_grad():
+        for param in model.parameters():
+            param.data = quantize_weights(param.data, N_BITS)
+
     model.eval()
 
     predicted_ok = 0
@@ -207,6 +213,7 @@ def main():
 
     # Evaluate the trained model.
     test_evaluation(model, validation_dataset)
+    import pdb;pdb.set_trace()
     
     torch.save(model.state_dict(), 'model_checkpoint.pth')
 
