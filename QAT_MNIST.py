@@ -47,23 +47,35 @@ OUTPUT_SIZE = 10
 N_BITS = 8
 
 # Training parameters.
-EPOCHS = 10
+EPOCHS = 20
 BATCH_SIZE = 64
 
-def quantize_weights(weights, n_bits):
-    """Quantize the weights to n_bits levels."""
-    # Map weights to [0, 1] range
-    w_min = weights.min()
-    w_max = weights.max()
-    weights = (weights - w_min) / (w_max - w_min)
+def find_global_min_max(model):
+    """Find global minimum and maximum weight values across all layers."""
+    all_weights = []
+    for param in model.parameters():
+        all_weights.append(param.data.flatten())
+    all_weights = torch.cat(all_weights)
+    global_min = all_weights.min()
+    global_max = all_weights.max()
+    return global_min, global_max
 
-    # Quantize
-    scale = 2 ** n_bits - 1
-    weights = torch.round(weights * scale) / scale
+def global_quantize_weights(model, n_bits):
+    """Quantize the weights of the entire model to n_bits levels using the same scale."""
+    w_min, w_max = find_global_min_max(model)
+    for param in model.parameters():
+        # Map weights to [0, 1] range
+        param.data = (param.data - w_min) / (w_max - w_min)
 
-    # Map weights back to original range
-    weights = weights * (w_max - w_min) + w_min
-    return weights
+        # Quantize
+        scale = 2 ** n_bits - 1
+        param.data = torch.round(param.data * scale) / scale
+
+        # Map weights back to original range
+        param.data = param.data * (w_max - w_min) + w_min
+
+    return model
+
 
 
 def load_images():
@@ -123,9 +135,9 @@ def train(model, train_set):
         train_set (DataLoader): dataset of elements to use as input for training.
     """
     classifier = nn.NLLLoss()
-    lr = 0.225
+    lr = 0.5
     optimizer = create_sgd_optimizer(model, lr)
-    scheduler = StepLR(optimizer, step_size=3, gamma=0.3)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.3)
 
     time_init = time()
     for epoch_number in range(EPOCHS):
@@ -135,11 +147,6 @@ def train(model, train_set):
             labels = labels.to(DEVICE)
             # Flatten MNIST images into a 784 vector.
             images = images.view(images.shape[0], -1)
-
-            # Quantize weights
-            with torch.no_grad():
-                for param in model.parameters():
-                    param.data = quantize_weights(param.data, N_BITS)
 
             optimizer.zero_grad()
             # Add training Tensor to the model (input).
@@ -151,6 +158,10 @@ def train(model, train_set):
 
             # Optimize weights.
             optimizer.step()
+
+            # Quantize weights
+            with torch.no_grad():
+                global_quantize_weights(model, N_BITS)
 
             total_loss += loss.item()
 
@@ -174,8 +185,7 @@ def test_evaluation(model, val_set):
     # Save initial state of the model for resetting before each drift operation.
     # Quantize weights
     with torch.no_grad():
-        for param in model.parameters():
-            param.data = quantize_weights(param.data, N_BITS)
+        global_quantize_weights(model, N_BITS)
 
     model.eval()
 
