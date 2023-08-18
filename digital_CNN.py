@@ -29,7 +29,7 @@ from torch import nn
 from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
-from diff_quant import DifferentialQuantizedLayer
+from diff_quant import DifferentialQuantizedLayer, DifferentialQuantizedLayerV2
 
 # Check device
 
@@ -85,12 +85,14 @@ def create_analog_network():
 # Modify the original model to use the custom layers
     model = nn.Sequential(
         # 1st Convolutional Layer
-        DifferentialQuantizedLayer(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1, padding=2), 4),
+        DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1), 4),
+        #nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1),
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=3, stride=3, padding=1),
 
         # 2nd Convolutional Layer
-        DifferentialQuantizedLayer(nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1, padding=2), 4),
+        DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1), 4),
+        #nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1),
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2, padding=1),
 
@@ -98,7 +100,8 @@ def create_analog_network():
         nn.Flatten(),
 
         # 1st Dense Layer
-        DifferentialQuantizedLayer(nn.Linear(192,10), 2),
+        DifferentialQuantizedLayerV2(nn.Linear(192,10), 2),
+        #nn.Linear(192,10),
         nn.LogSoftmax(dim=1)
     )
     if USE_CUDA:
@@ -127,6 +130,7 @@ def train(model, train_set):
     lr = 0.1
     optimizer = create_sgd_optimizer(model, lr)
     scheduler = StepLR(optimizer, step_size=10, gamma=0.3)
+    model.train()
 
     time_init = time()
     for epoch_number in range(EPOCHS):
@@ -137,7 +141,6 @@ def train(model, train_set):
 
             optimizer.zero_grad()
             # Add training Tensor to the model (input).
-            #import pdb;pdb.set_trace()
             output = model(images)
             loss = classifier(output, labels)
 
