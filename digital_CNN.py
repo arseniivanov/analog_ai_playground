@@ -22,6 +22,7 @@ for epochs 0–10, 11–20, and 21–30, respectively.
 
 import os
 from time import time
+import numpy as np
 
 # Imports from PyTorch.
 import torch
@@ -43,31 +44,119 @@ PATH_DATASET = os.path.join("data", "DATASET")
 EPOCHS = 20
 BATCH_SIZE = 64
 
-def find_global_min_max(model):
-    """Find global minimum and maximum weight values across all layers."""
-    all_weights = []
-    for param in model.parameters():
-        all_weights.append(param.data.flatten())
-    all_weights = torch.cat(all_weights)
-    global_min = all_weights.min()
-    global_max = all_weights.max()
-    return global_min, global_max
+# Extract weights from the model
+def extract_weights_from_model(model):
+    weights = []
+    for layer in model:
+        if isinstance(layer, (nn.Conv2d, nn.Linear)):
+            weights.append(layer.weight.detach().cpu().numpy().flatten())
+            if layer.bias is not None:
+                weights.append(layer.bias.detach().cpu().numpy().flatten())
+    return np.concatenate(weights)
 
-def global_quantize_weights(model, n_bits):
-    """Quantize the weights of the entire model to n_bits levels using the same scale."""
-    w_min, w_max = find_global_min_max(model)
-    for param in model.parameters():
-        # Map weights to [0, 1] range
-        param.data = (param.data - w_min) / (w_max - w_min)
+def initialize_bins(weights, N):
+    """Initialize bins for quantization."""
+    # Extract positive and negative weights
+    pos_weights = [w for w in weights if w >= 0]
+    neg_weights = [-w for w in weights if w < 0]
+    
+    # Initial delta calculations
+    delta_pos = max(pos_weights) / N if pos_weights else 0
+    delta_neg = max(neg_weights) / N if neg_weights else 0
+    
+    # Create bins based on deltas
+    pos_bins = [i * delta_pos for i in range(1, N+1)]
+    neg_bins = [-i * delta_neg for i in range(1, N+1)]
+    
+    return pos_bins, neg_bins
 
-        # Quantize
-        scale = 2 ** n_bits - 1
-        param.data = torch.round(param.data * scale) / scale
+def differential_quantization(model, bins):
+    pos_bins, neg_bins = initialize_bins(model, bins)
+    delta_pos, delta_neg = optimize_bins_strict_multiplicative(model, pos_bins, neg_bins)
+    print(delta_pos, delta_neg)
 
-        # Map weights back to original range
-        param.data = param.data * (w_max - w_min) + w_min
+def quantize_weight(w, bins):
+    """Quantizes a single weight using the provided bins."""
+    closest_value = min(bins, key=lambda x: abs(w - x))
+    return closest_value
 
-    return model
+def quantization_error_for_bins(weights, pos_bins, neg_bins):
+    """Computes the total quantization error for a set of weights using the provided bins."""
+    # Combine positive and negative bins and compute all pairwise differences
+    combined_bins = pos_bins + neg_bins + [p-n for p in pos_bins for n in neg_bins]
+    error = sum([abs(w - quantize_weight(w, combined_bins)) for w in weights])
+    return error
+
+def adjust_bin_multiplicative(bin_val, delta, direction, factor=0.1):
+    """Adjust a bin value by a fraction of delta in the given direction."""
+    return bin_val + delta * factor * direction
+
+import random
+def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=100, factor=1, sample_fraction=0.1, convergence_threshold=0.01):
+    """Optimize bins using hill climbing while maintaining strict multiplicative constraint."""
+    previous_error = float('inf')
+    
+    # Sample a subset of weights for faster error estimation
+    sample_size = int(len(weights) * sample_fraction)
+    sampled_weights = random.sample(list(weights), sample_size)
+    
+    # Ensure minimum delta values
+    min_delta_pos = max(weights) * 0.01  # 1% of the maximum positive weight
+    min_delta_neg = abs(min(weights)) * 0.01  # 1% of the maximum negative weight
+    
+    for c in range(iterations):
+        print("Iteration: ", c)
+        print("Error: ", previous_error)
+        d_0_pos = max(pos_bins[0], min_delta_pos)
+        d_0_neg = max(abs(neg_bins[0]), min_delta_neg)
+        
+        # Adjust each positive bin
+        for i in range(len(pos_bins)):
+            original_bin = pos_bins[i]
+            error_original = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+            
+            # Increase the bin value slightly
+            pos_bins[i] = adjust_bin_multiplicative(original_bin, d_0_pos, 1, factor)
+            error_increase = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+            
+            # Decrease the bin value slightly if increasing didn't reduce error
+            if error_increase >= error_original:
+                pos_bins[i] = adjust_bin_multiplicative(original_bin, d_0_pos, -1, factor)
+                error_decrease = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+                
+                # Revert to original value if neither direction reduced error
+                if error_decrease >= error_original:
+                    pos_bins[i] = original_bin
+        
+        # Adjust each negative bin
+        for i in range(len(neg_bins)):
+            original_bin = neg_bins[i]
+            error_original = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+            
+            # Increase the bin value slightly
+            neg_bins[i] = adjust_bin_multiplicative(original_bin, d_0_neg, 1, factor)
+            error_increase = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+            
+            # Decrease the bin value slightly if increasing didn't reduce error
+            if error_increase >= error_original:
+                neg_bins[i] = adjust_bin_multiplicative(original_bin, d_0_neg, -1, factor)
+                error_decrease = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+                
+                # Revert to original value if neither direction reduced error
+                if error_decrease >= error_original:
+                    neg_bins[i] = original_bin
+        
+        # Check for convergence
+        current_error = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+        if abs(previous_error - current_error) < convergence_threshold:
+            break
+        previous_error = current_error
+    
+    # Ensure strict multiplicative constraints
+    pos_bins = [i * d_0_pos for i in range(1, len(pos_bins) + 1)]
+    neg_bins = [-i * d_0_neg for i in range(1, len(neg_bins) + 1)]
+    
+    return pos_bins, neg_bins
 
 def load_images():
     """Load images for train from the torchvision datasets."""
@@ -85,14 +174,14 @@ def create_analog_network():
 # Modify the original model to use the custom layers
     model = nn.Sequential(
         # 1st Convolutional Layer
-        DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1), 4),
-        #nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1),
+        #DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1), 4),
+        nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1),
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=3, stride=3, padding=1),
 
         # 2nd Convolutional Layer
-        DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1), 4),
-        #nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1),
+        #DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1), 4),
+        nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1),
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2, padding=1),
 
@@ -100,8 +189,8 @@ def create_analog_network():
         nn.Flatten(),
 
         # 1st Dense Layer
-        DifferentialQuantizedLayerV2(nn.Linear(192,10), 2),
-        #nn.Linear(192,10),
+        #DifferentialQuantizedLayerV2(nn.Linear(192,10), 2),
+        nn.Linear(192,10),
         nn.LogSoftmax(dim=1)
     )
     if USE_CUDA:
@@ -181,7 +270,6 @@ def test_evaluation(model, val_set):
         images = images.to(DEVICE)
         labels = labels.to(DEVICE)
 
-        images = images.view(images.shape[0], -1)
         pred = model(images)
 
         _, predicted = torch.max(pred.data, 1)
@@ -192,24 +280,34 @@ def test_evaluation(model, val_set):
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
 
-
+TEST = 1
 
 def main():
     """Train a PyTorch analog model with the MNIST dataset."""
     # Load datasets.
     train_dataset, validation_dataset = load_images()
 
-    # Prepare the model.
     model = create_analog_network()
 
-    # Train the model.
-    train(model, train_dataset)
+    if not TEST:
+        # Train the model.
+        train(model, train_dataset)
 
-    # Evaluate the trained model.
-    test_evaluation(model, validation_dataset)
-    import pdb;pdb.set_trace()
+        # Evaluate the trained model.
+        test_evaluation(model, validation_dataset)
+
+        torch.save(model.state_dict(), 'model_checkpoint.pth')
     
-    torch.save(model.state_dict(), 'model_checkpoint.pth')
+    model.load_state_dict(torch.load('model_checkpoint.pth', map_location="cuda"))
+
+    model_weights = extract_weights_from_model(model)
+
+    differential_quantization(model_weights, 8)
+
+    # Evaluate the differentially quantized model.
+    #test_evaluation(model, validation_dataset)
+    
+    #torch.save(model.state_dict(), 'model_checkpoint.pth')
 
 
 
