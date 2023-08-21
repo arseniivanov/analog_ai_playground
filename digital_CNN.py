@@ -44,6 +44,31 @@ PATH_DATASET = os.path.join("data", "DATASET")
 EPOCHS = 20
 BATCH_SIZE = 64
 
+def adjust_model_weights_to_bins(model, pos_bins, neg_bins):
+    """
+    Adjust the weights of the model to be the quantized weights using the given bins.
+    """
+    # Combine positive and negative bins and compute all pairwise differences
+    combined_bins = pos_bins + neg_bins + [p-n for p in pos_bins for n in neg_bins]
+    
+    # Iterate over each layer in the model
+    for layer in model:
+        if isinstance(layer, (nn.Conv2d, nn.Linear)):
+            # Quantize each weight in the layer using the combined_bins
+            with torch.no_grad():
+                flattened_weights = layer.weight.data.flatten()
+                quantized_weights = torch.Tensor([quantize_weight(w.item(), combined_bins) for w in flattened_weights])
+                layer.weight.data = quantized_weights.reshape(layer.weight.data.shape)
+                
+                # If there is a bias, quantize it as well
+                if layer.bias is not None:
+                    flattened_bias = layer.bias.data.flatten()
+                    quantized_bias = torch.Tensor([quantize_weight(b.item(), combined_bins) for b in flattened_bias])
+                    layer.bias.data = quantized_bias.reshape(layer.bias.data.shape)
+    
+    # Return the modified model
+    return model
+
 # Extract weights from the model
 def extract_weights_from_model(model):
     weights = []
@@ -70,10 +95,18 @@ def initialize_bins(weights, N):
     
     return pos_bins, neg_bins
 
-def differential_quantization(model, bins):
-    pos_bins, neg_bins = initialize_bins(model, bins)
-    delta_pos, delta_neg = optimize_bins_strict_multiplicative(model, pos_bins, neg_bins)
+def differential_quantization(model, bins, preset=False):
+    model_weights = extract_weights_from_model(model)
+    if not preset:
+        pos_bins, neg_bins = initialize_bins(model_weights, bins)
+        delta_pos, delta_neg = optimize_bins_strict_multiplicative(model_weights, pos_bins, neg_bins)
+    else:
+        delta_pos = preset[0]
+        delta_neg = preset[1]
     print(delta_pos, delta_neg)
+    adjusted_model = adjust_model_weights_to_bins(model, delta_pos, delta_neg).to("cuda")
+    print(adjusted_model)
+    return adjusted_model
 
 def quantize_weight(w, bins):
     """Quantizes a single weight using the provided bins."""
@@ -300,14 +333,14 @@ def main():
     
     model.load_state_dict(torch.load('model_checkpoint.pth', map_location="cuda"))
 
-    model_weights = extract_weights_from_model(model)
+    preset = [[0.00875668168067932, 0.01751336336135864, 0.026270045042037962, 0.03502672672271728, 0.043783408403396604, 0.052540090084075924, 0.061296771764755245, 0.07005345344543457], [-0.1439693421125412, -0.2879386842250824, -0.4319080263376236, -0.5758773684501648, -0.719846710562706, -0.8638160526752472, -1.0077853947877884, -1.1517547369003296]]
 
-    differential_quantization(model_weights, 8)
+    quantized_model = differential_quantization(model, 8, preset=preset)
 
     # Evaluate the differentially quantized model.
-    #test_evaluation(model, validation_dataset)
+    test_evaluation(quantized_model, validation_dataset)
     
-    #torch.save(model.state_dict(), 'model_checkpoint.pth')
+    torch.save(model.state_dict(), 'quantized_mnist.pth')
 
 
 
