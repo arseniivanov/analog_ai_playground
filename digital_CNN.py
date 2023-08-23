@@ -49,7 +49,7 @@ def adjust_model_weights_to_bins(model, pos_bins, neg_bins):
     Adjust the weights of the model to be the quantized weights using the given bins.
     """
     # Combine positive and negative bins and compute all pairwise differences
-    combined_bins = pos_bins + neg_bins + [p-n for p in pos_bins for n in neg_bins]
+    combined_bins = pos_bins + neg_bins + [p+n for p in pos_bins for n in neg_bins]
     
     # Iterate over each layer in the model
     for layer in model:
@@ -92,6 +92,7 @@ def initialize_bins(weights, N):
     # Create bins based on deltas
     pos_bins = [i * delta_pos for i in range(1, N+1)]
     neg_bins = [-i * delta_neg for i in range(1, N+1)]
+    print(pos_bins, neg_bins)
     
     return pos_bins, neg_bins
 
@@ -106,7 +107,7 @@ def differential_quantization(model, bins, preset=False):
     print(delta_pos, delta_neg)
     adjusted_model = adjust_model_weights_to_bins(model, delta_pos, delta_neg).to("cuda")
     print(adjusted_model)
-    return adjusted_model
+    return adjusted_model, delta_pos, delta_neg
 
 def quantize_weight(w, bins):
     """Quantizes a single weight using the provided bins."""
@@ -116,7 +117,7 @@ def quantize_weight(w, bins):
 def quantization_error_for_bins(weights, pos_bins, neg_bins):
     """Computes the total quantization error for a set of weights using the provided bins."""
     # Combine positive and negative bins and compute all pairwise differences
-    combined_bins = pos_bins + neg_bins + [p-n for p in pos_bins for n in neg_bins]
+    combined_bins = pos_bins + neg_bins + [p+n for p in pos_bins for n in neg_bins]
     error = sum([abs(w - quantize_weight(w, combined_bins)) for w in weights])
     return error
 
@@ -125,7 +126,7 @@ def adjust_bin_multiplicative(bin_val, delta, direction, factor=0.1):
     return bin_val + delta * factor * direction
 
 import random
-def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=100, factor=1, sample_fraction=0.1, convergence_threshold=0.01):
+def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=100, factor=1, sample_fraction=1.0, convergence_threshold=0.01):
     """Optimize bins using hill climbing while maintaining strict multiplicative constraint."""
     previous_error = float('inf')
     
@@ -143,41 +144,33 @@ def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=
         d_0_pos = max(pos_bins[0], min_delta_pos)
         d_0_neg = max(abs(neg_bins[0]), min_delta_neg)
         
-        # Adjust each positive bin
-        for i in range(len(pos_bins)):
-            original_bin = pos_bins[i]
-            error_original = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+        # Adjust all positive bins with the same factor
+        original_pos_bins = pos_bins.copy()
+        pos_bins = [adjust_bin_multiplicative(bin_val, d_0_pos, 1, factor) for bin_val in pos_bins]
+        error_increase_pos = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+
+        # Revert to original if increasing didn't reduce error
+        if error_increase_pos >= previous_error:
+            pos_bins = [adjust_bin_multiplicative(bin_val, d_0_pos, -1, factor) for bin_val in original_pos_bins]
+            error_decrease_pos = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
             
-            # Increase the bin value slightly
-            pos_bins[i] = adjust_bin_multiplicative(original_bin, d_0_pos, 1, factor)
-            error_increase = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+            # Revert to original if neither direction reduced error
+            if error_decrease_pos >= previous_error:
+                pos_bins = original_pos_bins
+
+        # Adjust all negative bins with the same factor
+        original_neg_bins = neg_bins.copy()
+        neg_bins = [adjust_bin_multiplicative(bin_val, d_0_neg, 1, factor) for bin_val in neg_bins]
+        error_increase_neg = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+
+        # Revert to original if increasing didn't reduce error
+        if error_increase_neg >= previous_error:
+            neg_bins = [adjust_bin_multiplicative(bin_val, d_0_neg, -1, factor) for bin_val in original_neg_bins]
+            error_decrease_neg = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
             
-            # Decrease the bin value slightly if increasing didn't reduce error
-            if error_increase >= error_original:
-                pos_bins[i] = adjust_bin_multiplicative(original_bin, d_0_pos, -1, factor)
-                error_decrease = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
-                
-                # Revert to original value if neither direction reduced error
-                if error_decrease >= error_original:
-                    pos_bins[i] = original_bin
-        
-        # Adjust each negative bin
-        for i in range(len(neg_bins)):
-            original_bin = neg_bins[i]
-            error_original = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
-            
-            # Increase the bin value slightly
-            neg_bins[i] = adjust_bin_multiplicative(original_bin, d_0_neg, 1, factor)
-            error_increase = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
-            
-            # Decrease the bin value slightly if increasing didn't reduce error
-            if error_increase >= error_original:
-                neg_bins[i] = adjust_bin_multiplicative(original_bin, d_0_neg, -1, factor)
-                error_decrease = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
-                
-                # Revert to original value if neither direction reduced error
-                if error_decrease >= error_original:
-                    neg_bins[i] = original_bin
+            # Revert to original if neither direction reduced error
+            if error_decrease_neg >= previous_error:
+                neg_bins = original_neg_bins
         
         # Check for convergence
         current_error = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
@@ -185,11 +178,8 @@ def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=
             break
         previous_error = current_error
     
-    # Ensure strict multiplicative constraints
-    pos_bins = [i * d_0_pos for i in range(1, len(pos_bins) + 1)]
-    neg_bins = [-i * d_0_neg for i in range(1, len(neg_bins) + 1)]
-    
     return pos_bins, neg_bins
+
 
 def load_images():
     """Load images for train from the torchvision datasets."""
@@ -275,7 +265,7 @@ def train(model, train_set):
             total_loss += loss.item()
 
         print("Epoch {} - Training loss: {:.16f}".format(epoch_number, total_loss / len(train_set)))
-        if total_loss / len(train_set) < 0.1:
+        if total_loss / len(train_set) < 0.08:
             break
         
         # Decay learning rate if needed.
@@ -312,6 +302,44 @@ def test_evaluation(model, val_set):
     print("\nFinal Number Of Images Tested = {}".format(total_images))
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
+import matplotlib.pyplot as plt
+
+def construct_weight_matrix_and_histogram(model, pos_bins, neg_bins):
+    # Extract the quantized weights from the model
+    quantized_weights = extract_weights_from_model(model)
+
+    # Create combined bins and initialize weight counts
+    combined_bins = [p + n for p in pos_bins for n in neg_bins]
+    all_bins = pos_bins + neg_bins + combined_bins
+    weight_counts = {bin_value: 0 for bin_value in all_bins}
+
+    # Iterate through the quantized weights and find the corresponding bin
+    for weight in quantized_weights:
+        closest_bin = min(all_bins, key=lambda x: abs(weight - x))
+        weight_counts[closest_bin] += 1
+
+    # Filter out bins with 0 entries
+    weight_counts = {k: v for k, v in weight_counts.items() if v > 0}
+
+    # Separate bins and counts by type
+    pos_counts = [(k, v) for k, v in weight_counts.items() if k in pos_bins]
+    neg_counts = [(k, v) for k, v in weight_counts.items() if k in neg_bins]
+    combined_counts = [(k, v) for k, v in weight_counts.items() if k in combined_bins]
+
+    # Plot the scatter plot
+    for counts, color, label in zip([pos_counts, neg_counts, combined_counts], ['blue', 'red', 'green'], ['Positive', 'Negative', 'Combined']):
+        if counts:  # Check if counts is not empty
+            bins, values = zip(*counts)
+            plt.scatter(bins, values, color=color, label=label, s=30)
+    
+    plt.xlabel('Bin Value')
+    plt.ylabel('Count')
+    plt.title('Scatter Plot of Weight Counts')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    return weight_counts
 
 TEST = 1
 
@@ -333,13 +361,19 @@ def main():
     
     model.load_state_dict(torch.load('model_checkpoint.pth', map_location="cuda"))
 
-    preset = [[0.00875668168067932, 0.01751336336135864, 0.026270045042037962, 0.03502672672271728, 0.043783408403396604, 0.052540090084075924, 0.061296771764755245, 0.07005345344543457], [-0.1439693421125412, -0.2879386842250824, -0.4319080263376236, -0.5758773684501648, -0.719846710562706, -0.8638160526752472, -1.0077853947877884, -1.1517547369003296]]
+    test_evaluation(model, validation_dataset)
 
-    quantized_model = differential_quantization(model, 8, preset=preset)
+    #preset = [[0.01020156979560852, 0.02040313959121704, 0.030604709386825562, 0.04080627918243408, 0.0510078489780426, 0.061209418773651124, 0.07141098856925965, 0.08161255836486817], [-0.12498563528060913, -0.24997127056121826, -0.3749569058418274, -0.4999425411224365, -0.6249281764030457, -0.7499138116836548, -0.8748994469642639, -0.999885082244873]]
+    preset = None
+
+    quantized_model, pos_bins, neg_bins = differential_quantization(model, 8, preset=preset)
 
     # Evaluate the differentially quantized model.
     test_evaluation(quantized_model, validation_dataset)
+    print(pos_bins, neg_bins)
     
+    simplified_weights = construct_weight_matrix_and_histogram(quantized_model, pos_bins, neg_bins)
+
     torch.save(model.state_dict(), 'quantized_mnist.pth')
 
 
