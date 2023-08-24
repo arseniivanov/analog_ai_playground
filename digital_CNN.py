@@ -125,10 +125,18 @@ def adjust_bin_multiplicative(bin_val, delta, direction, factor=0.1):
     """Adjust a bin value by a fraction of delta in the given direction."""
     return bin_val + delta * factor * direction
 
+def adjust_bins_multiplicative(bins, delta, direction, bin_count, factor=0.1):
+    """Adjust a bin value by a fraction of delta in the given direction."""
+    std = bins[0] + delta * factor * direction
+    new_bins = [std * k for k in range(1,bin_count)]
+    return new_bins
+
 import random
+import copy
 def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=100, factor=1, sample_fraction=1.0, convergence_threshold=0.01):
     """Optimize bins using hill climbing while maintaining strict multiplicative constraint."""
     previous_error = float('inf')
+    bin_count = 8
     
     # Sample a subset of weights for faster error estimation
     sample_size = int(len(weights) * sample_fraction)
@@ -146,26 +154,32 @@ def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=
         
         # Adjust all positive bins with the same factor
         original_pos_bins = pos_bins.copy()
-        pos_bins = [adjust_bin_multiplicative(bin_val, d_0_pos, 1, factor) for bin_val in pos_bins]
+        pos_bins = adjust_bins_multiplicative(original_pos_bins, d_0_pos, 1, bin_count, factor)
         error_increase_pos = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
 
         # Revert to original if increasing didn't reduce error
         if error_increase_pos >= previous_error:
-            pos_bins = [adjust_bin_multiplicative(bin_val, d_0_pos, -1, factor) for bin_val in original_pos_bins]
-            error_decrease_pos = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
-            
+            if adjust_bin_multiplicative(copy.deepcopy(original_pos_bins[0]), d_0_pos, -1, factor) < 0:
+                error_decrease_pos = 1000
+            else:
+                pos_bins = adjust_bins_multiplicative(original_pos_bins, d_0_pos, -1, bin_count, factor)
+                error_decrease_pos = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+
             # Revert to original if neither direction reduced error
             if error_decrease_pos >= previous_error:
                 pos_bins = original_pos_bins
 
         # Adjust all negative bins with the same factor
         original_neg_bins = neg_bins.copy()
-        neg_bins = [adjust_bin_multiplicative(bin_val, d_0_neg, 1, factor) for bin_val in neg_bins]
-        error_increase_neg = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
+        if adjust_bin_multiplicative(copy.deepcopy(original_neg_bins[0]), d_0_neg, 1, factor) >= 0:
+            error_increase_neg = 1000
+        else:
+            neg_bins = adjust_bins_multiplicative(original_neg_bins, d_0_neg, 1, bin_count, factor)
+            error_increase_neg = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
 
         # Revert to original if increasing didn't reduce error
         if error_increase_neg >= previous_error:
-            neg_bins = [adjust_bin_multiplicative(bin_val, d_0_neg, -1, factor) for bin_val in original_neg_bins]
+            neg_bins = adjust_bins_multiplicative(original_neg_bins, d_0_neg, -1, bin_count, factor)
             error_decrease_neg = quantization_error_for_bins(sampled_weights, pos_bins, neg_bins)
             
             # Revert to original if neither direction reduced error
@@ -363,7 +377,7 @@ def main():
 
     test_evaluation(model, validation_dataset)
 
-    #preset = [[0.01020156979560852, 0.02040313959121704, 0.030604709386825562, 0.04080627918243408, 0.0510078489780426, 0.061209418773651124, 0.07141098856925965, 0.08161255836486817], [-0.12498563528060913, -0.24997127056121826, -0.3749569058418274, -0.4999425411224365, -0.6249281764030457, -0.7499138116836548, -0.8748994469642639, -0.999885082244873]]
+    #preset = [[0.255039244890213, 0.510078489780426, 0.765117734670639, 1.020156979560852, 1.275196224451065, 1.530235469341278, 1.785274714231491], [-0.12498563528060913, -0.24997127056121826, -0.3749569058418274, -0.4999425411224365, -0.6249281764030457, -0.7499138116836548, -0.8748994469642639, -0.999885082244873]]
     preset = None
 
     quantized_model, pos_bins, neg_bins = differential_quantization(model, 8, preset=preset)
