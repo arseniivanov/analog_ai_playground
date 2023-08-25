@@ -30,7 +30,9 @@ from torch import nn
 from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
-from diff_quant import DifferentialQuantizedLayer, DifferentialQuantizedLayerV2
+import matplotlib.pyplot as plt
+import random
+import copy
 
 # Check device
 
@@ -100,7 +102,7 @@ def differential_quantization(model, bins, preset=False):
     model_weights = extract_weights_from_model(model)
     if not preset:
         pos_bins, neg_bins = initialize_bins(model_weights, bins)
-        delta_pos, delta_neg = optimize_bins_strict_multiplicative(model_weights, pos_bins, neg_bins)
+        delta_pos, delta_neg = optimize_bins_simulated_annealing_non_linear(model_weights, pos_bins, neg_bins)
     else:
         delta_pos = preset[0]
         delta_neg = preset[1]
@@ -131,8 +133,107 @@ def adjust_bins_multiplicative(bins, delta, direction, bin_count, factor=0.1):
     new_bins = [std * k for k in range(1,bin_count)]
     return new_bins
 
-import random
-import copy
+def simulated_annealing_schedule(T, alpha=0.95):
+    """Cooling schedule for simulated annealing."""
+    return T * alpha
+
+def perturb_bin_base(bin_base, delta, direction):
+    """Perturb a bin base value in the given direction while maintaining the multiplicative constraint."""
+    return bin_base + delta * direction
+
+def create_non_linear_bins(smallest_bin, bin_count, max_multiple):
+    """Create non-linear bins using various multiples of the smallest bin."""
+    multiples = [1] + list(np.random.choice(range(2, max_multiple+1), size=bin_count-1, replace=False))
+    return [smallest_bin * multiple for multiple in multiples]
+
+def optimize_bins_simulated_annealing_non_linear(weights, pos_bins, neg_bins, iterations=80, T=1.0, alpha=0.95, max_multiple=12):
+    """Optimize bins using simulated annealing allowing for non-linear binning."""
+    current_pos_smallest_bin = pos_bins[0]
+    current_neg_smallest_bin = abs(neg_bins[0])
+    bin_count = len(pos_bins)
+    current_error = quantization_error_for_bins(weights, pos_bins, neg_bins)
+
+    best_pos_bins = pos_bins.copy()
+    best_neg_bins = neg_bins.copy()
+    best_error = current_error
+
+    for i in range(iterations):
+        print("Iteration: ", i)
+        print("Error: ", current_error)
+        # Apply cooling schedule
+        T = simulated_annealing_schedule(T, alpha)
+
+        # Perturb positive and negative smallest bins
+        proposed_pos_smallest_bin = current_pos_smallest_bin + T * np.random.randn() * (max(weights) / 100)
+        proposed_neg_smallest_bin = current_neg_smallest_bin + T * np.random.randn() * (abs(min(weights)) / 100)
+
+        # Create non-linear bins using various multiples
+        proposed_pos_bins = create_non_linear_bins(proposed_pos_smallest_bin, bin_count, max_multiple)
+        proposed_neg_bins = [-x for x in create_non_linear_bins(proposed_neg_smallest_bin, bin_count, max_multiple)]
+
+        # Compute error for proposed bins
+        proposed_error = quantization_error_for_bins(weights, proposed_pos_bins, proposed_neg_bins)
+
+        # Metropolis criterion
+        if proposed_error < current_error or np.random.rand() < np.exp(-(proposed_error - current_error) / T):
+            current_pos_smallest_bin = proposed_pos_smallest_bin
+            current_neg_smallest_bin = proposed_neg_smallest_bin
+            current_error = proposed_error
+
+            if proposed_error < best_error:
+                best_pos_bins = proposed_pos_bins.copy()
+                best_neg_bins = proposed_neg_bins.copy()
+                best_error = proposed_error
+
+    return sorted(best_pos_bins), sorted(best_neg_bins, reverse=True)
+
+
+def optimize_bins_simulated_annealing_linear(weights, pos_bins, neg_bins, iterations=15, T=1.0, alpha=0.95):
+    """Optimize bins using simulated annealing."""
+    current_pos_base = pos_bins[0]
+    current_neg_base = abs(neg_bins[0])
+    bin_count = len(pos_bins)
+    current_error = quantization_error_for_bins(weights, pos_bins, neg_bins)
+
+    best_pos_base = current_pos_base
+    best_neg_base = current_neg_base
+    best_error = current_error
+
+    for i in range(iterations):
+        print("Iteration: ", i)
+        print("Error: ", current_error)
+        # Apply cooling schedule
+        T = simulated_annealing_schedule(T, alpha)
+
+        # Perturb positive and negative bases
+        direction_pos = np.random.choice([-1, 1])
+        direction_neg = np.random.choice([-1, 1])
+        proposed_pos_base = perturb_bin_base(current_pos_base, T * np.random.rand() * (max(weights) / 100), direction_pos)
+        proposed_neg_base = perturb_bin_base(current_neg_base, T * np.random.rand() * (abs(min(weights)) / 100), direction_neg)
+
+        # Recreate bins based on new bases
+        proposed_pos_bins = [proposed_pos_base * k for k in range(1, bin_count+1)]
+        proposed_neg_bins = [-proposed_neg_base * k for k in range(1, bin_count+1)]
+
+        # Compute error for proposed bins
+        proposed_error = quantization_error_for_bins(weights, proposed_pos_bins, proposed_neg_bins)
+
+        # Metropolis criterion
+        if proposed_error < current_error or np.random.rand() < np.exp(-(proposed_error - current_error) / T):
+            current_pos_base = proposed_pos_base
+            current_neg_base = proposed_neg_base
+            current_error = proposed_error
+
+            if proposed_error < best_error:
+                best_pos_base = proposed_pos_base
+                best_neg_base = proposed_neg_base
+                best_error = proposed_error
+
+    best_pos_bins = [best_pos_base * k for k in range(1, bin_count+1)]
+    best_neg_bins = [-best_neg_base * k for k in range(1, bin_count+1)]
+
+    return best_pos_bins, best_neg_bins
+
 def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=100, factor=1, sample_fraction=1.0, convergence_threshold=0.01):
     """Optimize bins using hill climbing while maintaining strict multiplicative constraint."""
     previous_error = float('inf')
@@ -316,8 +417,6 @@ def test_evaluation(model, val_set):
     print("\nFinal Number Of Images Tested = {}".format(total_images))
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
-import matplotlib.pyplot as plt
-
 def construct_weight_matrix_and_histogram(model, pos_bins, neg_bins):
     # Extract the quantized weights from the model
     quantized_weights = extract_weights_from_model(model)
@@ -377,7 +476,7 @@ def main():
 
     test_evaluation(model, validation_dataset)
 
-    #preset = [[0.255039244890213, 0.510078489780426, 0.765117734670639, 1.020156979560852, 1.275196224451065, 1.530235469341278, 1.785274714231491], [-0.12498563528060913, -0.24997127056121826, -0.3749569058418274, -0.4999425411224365, -0.6249281764030457, -0.7499138116836548, -0.8748994469642639, -0.999885082244873]]
+    #preset = [[0.12710632124397625, 0.2542126424879525, 0.38131896373192875, 0.508425284975905, 0.6355316062198813, 0.7626379274638575, 0.8897442487078338, 1.01685056995181], [-0.10777571643075712, -0.21555143286151424, -0.32332714929227135, -0.43110286572302847, -0.5388785821537856, -0.6466542985845427, -0.7544300150152998, -0.8622057314460569]]
     preset = None
 
     quantized_model, pos_bins, neg_bins = differential_quantization(model, 8, preset=preset)
