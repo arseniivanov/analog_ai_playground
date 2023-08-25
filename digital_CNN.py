@@ -454,6 +454,34 @@ def construct_weight_matrix_and_histogram(model, pos_bins, neg_bins):
 
     return weight_counts
 
+
+def construct_multipliers(model, pos_bins, neg_bins, pos_multipliers_dict, neg_multipliers_dict):
+    combined_bins = pos_bins + neg_bins + [p + n for p in pos_bins for n in neg_bins]
+
+    for name, layer in model.named_modules():
+        if isinstance(layer, (nn.Conv2d, nn.Linear)):
+            with torch.no_grad():
+                # Initialize matrices to store multipliers
+                pos_multipliers = torch.zeros_like(layer.weight, dtype=torch.int8)
+                neg_multipliers = torch.zeros_like(layer.weight, dtype=torch.int8)
+
+                # Flatten the weight tensor for easier iteration
+                flattened_weights = layer.weight.data.flatten()
+
+                for idx, w in enumerate(flattened_weights):
+                    closest_value = quantize_weight(w.item(), combined_bins)
+                    
+                    # Determine which bin the closest_value belongs to and store its index (multiplier)
+                    if closest_value in pos_bins:
+                        pos_multipliers.view(-1)[idx] = pos_bins.index(closest_value) + 1  # +1 to account for zero-based index
+                    elif closest_value in neg_bins:
+                        neg_multipliers.view(-1)[idx] = neg_bins.index(closest_value) + 1  # +1 to account for zero-based index
+
+                # Store the multiplier matrices in the dictionaries
+                pos_multipliers_dict[name] = pos_multipliers
+                neg_multipliers_dict[name] = neg_multipliers
+    return pos_multipliers_dict, neg_multipliers_dict
+
 TEST = 1
 
 def main():
@@ -476,8 +504,8 @@ def main():
 
     test_evaluation(model, validation_dataset)
 
-    #preset = [[0.12710632124397625, 0.2542126424879525, 0.38131896373192875, 0.508425284975905, 0.6355316062198813, 0.7626379274638575, 0.8897442487078338, 1.01685056995181], [-0.10777571643075712, -0.21555143286151424, -0.32332714929227135, -0.43110286572302847, -0.5388785821537856, -0.6466542985845427, -0.7544300150152998, -0.8622057314460569]]
-    preset = None
+    preset = [[0.12710632124397625, 0.2542126424879525, 0.38131896373192875, 0.508425284975905, 0.6355316062198813, 0.7626379274638575, 0.8897442487078338, 1.01685056995181], [-0.10777571643075712, -0.21555143286151424, -0.32332714929227135, -0.43110286572302847, -0.5388785821537856, -0.6466542985845427, -0.7544300150152998, -0.8622057314460569]]
+    #preset = None
 
     quantized_model, pos_bins, neg_bins = differential_quantization(model, 8, preset=preset)
 
@@ -488,6 +516,23 @@ def main():
     simplified_weights = construct_weight_matrix_and_histogram(quantized_model, pos_bins, neg_bins)
 
     torch.save(model.state_dict(), 'quantized_mnist.pth')
+
+    pos_multipliers_dict = {}
+    neg_multipliers_dict = {}
+    # Call the function to construct the multipliers
+    construct_multipliers(quantized_model, pos_bins, neg_bins, pos_multipliers_dict, neg_multipliers_dict)
+    # Save the multiplier dictionaries as .pth files
+    concatenated_pos = torch.cat([torch.flatten(tensor) for tensor in pos_multipliers_dict.values()])
+    concatenated_neg = torch.cat([torch.flatten(tensor) for tensor in neg_multipliers_dict.values()])
+
+    # Find the maximum value in the concatenated tensor
+    largest_multiplier_pos = torch.max(concatenated_pos).item()
+    largest_multiplier_neg = torch.max(concatenated_neg).item()
+
+    torch.save(pos_multipliers_dict, f"{pos_bins[0]}_{largest_multiplier_pos}_multipliers.pth")
+    torch.save(neg_multipliers_dict, f"{neg_bins[0]}_{largest_multiplier_neg}_multipliers.pth")
+
+
 
 
 
