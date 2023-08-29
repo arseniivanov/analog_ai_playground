@@ -102,7 +102,7 @@ def differential_quantization(model, bins, preset=False):
     model_weights = extract_weights_from_model(model)
     if not preset:
         pos_bins, neg_bins = initialize_bins(model_weights, bins)
-        delta_pos, delta_neg = optimize_bins_simulated_annealing_non_linear(model_weights, pos_bins, neg_bins)
+        delta_pos, delta_neg = optimize_bins_simulated_annealing_linear(model_weights, pos_bins, neg_bins)
     else:
         delta_pos = preset[0]
         delta_neg = preset[1]
@@ -346,7 +346,7 @@ def create_sgd_optimizer(model, lr):
     optimizer = SGD(model.parameters(), lr=lr)
     return optimizer
 
-def train(model, train_set):
+def train(model, train_set, epsilon=1e-1):
     """Train the network.
 
     Args:
@@ -371,6 +371,12 @@ def train(model, train_set):
             output = model(images)
             loss = classifier(output, labels)
 
+            # Add a penalty term for weights below epsilon
+            penalty = 0.0
+            for param in model.parameters():
+                penalty += torch.sum(torch.relu(epsilon - torch.abs(param)) * (torch.abs(param) < epsilon))
+            
+            loss = loss + penalty
             # Run training (backward propagation).
             loss.backward()
 
@@ -482,7 +488,7 @@ def construct_multipliers(model, pos_bins, neg_bins, pos_multipliers_dict, neg_m
                 neg_multipliers_dict[name] = neg_multipliers
     return pos_multipliers_dict, neg_multipliers_dict
 
-TEST = 1
+TEST = 0
 
 def main():
     """Train a PyTorch analog model with the MNIST dataset."""
@@ -504,8 +510,8 @@ def main():
 
     test_evaluation(model, validation_dataset)
 
-    preset = [[0.12710632124397625, 0.2542126424879525, 0.38131896373192875, 0.508425284975905, 0.6355316062198813, 0.7626379274638575, 0.8897442487078338, 1.01685056995181], [-0.10777571643075712, -0.21555143286151424, -0.32332714929227135, -0.43110286572302847, -0.5388785821537856, -0.6466542985845427, -0.7544300150152998, -0.8622057314460569]]
-    #preset = None
+    #preset = [[0.2300284672271867, 0.4600569344543734, 0.6900854016815601, 0.9201138689087468, 1.1501423361359335, 1.3801708033631201, 1.610199270590307, 1.8402277378174936], [-0.17908795726111681, -0.35817591452223363, -0.5372638717833504, -0.7163518290444673, -0.8954397863055841, -1.0745277435667009, -1.2536157008278177, -1.4327036580889345]]
+    preset = None
 
     quantized_model, pos_bins, neg_bins = differential_quantization(model, 8, preset=preset)
 
