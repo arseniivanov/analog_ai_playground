@@ -374,7 +374,7 @@ def train(model, train_set, epsilon=1e-1):
             # Add a penalty term for weights below epsilon
             penalty = 0.0
             for param in model.parameters():
-                penalty += torch.sum(torch.relu(epsilon - torch.abs(param)) * (torch.abs(param) < epsilon))
+                penalty += torch.sum((epsilon - torch.abs(param)) * (torch.abs(param) < epsilon))
             
             loss = loss + penalty
             # Run training (backward propagation).
