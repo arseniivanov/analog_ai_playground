@@ -91,7 +91,7 @@ def digital_to_analog(model):
 
     # drift compensation
     rpu_config.drift_compensation = GlobalDriftCompensation()
-    model.load_state_dict(torch.load('model_checkpoint.pth', map_location="cpu"))
+    model.load_state_dict(torch.load('quantized_mnist.pth', map_location="cpu"))
 
     return model, rpu_config
 
@@ -108,7 +108,7 @@ def create_sgd_optimizer(model, lr):
 
     return optimizer
 
-def train(model, train_set, epsilon=1e-1):
+def train(model, train_set, pos_multipliers_file, neg_multipliers_file, epsilon=1e-1):
     """Train the network.
 
     Args:
@@ -119,6 +119,16 @@ def train(model, train_set, epsilon=1e-1):
     lr = 0.01
     optimizer = create_sgd_optimizer(model, lr)
     scheduler = StepLR(optimizer, step_size=40, gamma=0.5)
+
+    pos_multipliers_dict = torch.load(pos_multipliers_file, map_location="cpu")
+    neg_multipliers_dict = torch.load(neg_multipliers_file, map_location="cpu")
+
+    # Extract initial factors from filenames
+    
+    pos_factor = float(pos_multipliers_file.split("_")[0])
+    neg_factor = float(neg_multipliers_file.split("_")[0])
+
+    print("Initial multipliers: ", pos_factor, " | ", neg_factor)
 
     time_init = time()
     for epoch_number in range(EPOCHS):
@@ -139,6 +149,22 @@ def train(model, train_set, epsilon=1e-1):
             # Run training (backward propagation).
             loss.backward()
 
+            # Constraint: Keep integer multiples constant, allow factors to be optimized
+            for name, param in model.named_parameters():
+                if name in pos_multipliers_dict:  # Assuming names match
+                    pos_multiples = pos_multipliers_dict[name]
+                    neg_multiples = neg_multipliers_dict[name]
+                    
+                    grad_data = param.grad.data
+                    
+                    # Update factors based on gradients
+                    pos_factor -= lr * (grad_data * (pos_multiples * pos_factor)).sum() / pos_multiples.numel()
+                    neg_factor -= lr * (grad_data * (neg_multiples * neg_factor)).sum() / neg_multiples.numel()
+                    
+                    # Update the actual weights from multipliers and updated factors
+                    new_weight_data = pos_multiples * pos_factor + neg_multiples * neg_factor
+                    param.data.copy_(new_weight_data)
+
             # Optimize weights.
             optimizer.step()
 
@@ -154,6 +180,7 @@ def train(model, train_set, epsilon=1e-1):
         # Decay learning rate if needed.
         scheduler.step()
 
+    print("Final multipliers: ", pos_factor, " | ", neg_factor)
     print("\nTraining Time (s) = {}".format(time() - time_init))
 
 def test_evaluation(model, val_set):
@@ -234,7 +261,7 @@ def main():
     test_evaluation(model, validation_dataset)
     analog_model = convert_to_analog(model, rpu_config)
     test_evaluation(analog_model, validation_dataset)
-    train(analog_model, train_dataset)
+    #train(analog_model, train_dataset, "0.2300284672271867_7_multipliers.pth", "-0.17908795726111681_8_multipliers.pth")
     test_evaluation_future(analog_model, validation_dataset)
 
 if __name__ == "__main__":
