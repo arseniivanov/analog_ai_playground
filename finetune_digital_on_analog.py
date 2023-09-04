@@ -26,6 +26,9 @@ EPOCHS = 4
 BATCH_SIZE = 64
 DEVICE = torch.device("cpu")
 
+POS_WEIGHTS_PTH = "0.2300284672271867_7_multipliers.pth"
+NEG_WEIGHTS_PTH = "-0.17908795726111681_8_multipliers.pth"
+
 def load_digital_model():
 # Modify the original model to use the custom layers
     model = nn.Sequential(
@@ -211,7 +214,7 @@ def test_evaluation(model, val_set):
     print("\nFinal Number Of Images Tested = {}".format(total_images))
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
-def test_evaluation_future(model, val_set):
+def test_evaluation_future(model, val_set, pos_multipliers_file, neg_multipliers_file):
     """Test trained network
 
     Args:
@@ -249,7 +252,72 @@ def test_evaluation_future(model, val_set):
     print("\nFinal Number Of Images Tested = {}".format(total_images))
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
+def create_identity_input(layer):
+    if isinstance(layer, torch.nn.Conv2d):
+        # For Conv2d, creating an identity matrix is non-trivial.
+        # You might want to pass a specific kind of tensor here.
+        return torch.ones((1, layer.in_channels, layer.kernel_size[0], layer.kernel_size[1]))
+    elif isinstance(layer, torch.nn.Linear):
+        return torch.eye(layer.in_features)
+    else:
+        return None
 
+def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_multipliers_file):
+    """Test trained network
+
+    Args:
+        model (nn.Model): Trained model to be evaluated
+        val_set (DataLoader): Validation set to perform the evaluation
+    """
+    # Save initial state of the model for resetting before each drift operation.
+    pos_multipliers_dict = torch.load(pos_multipliers_file, map_location="cpu")
+    neg_multipliers_dict = torch.load(neg_multipliers_file, map_location="cpu")
+
+    # Extract initial factors from filenames
+    
+    pos_factor = float(pos_multipliers_file.split("_")[0])
+    neg_factor = float(neg_multipliers_file.split("_")[0])
+
+    # Dictionary to store initial values
+    initial_values = {}
+
+    model.eval()
+    with torch.no_grad():
+        for name, layer in model.named_children():
+            id_input = create_identity_input(layer)
+            if id_input is not None:
+                x = layer(id_input)
+                initial_values[name] = x.clone()
+
+    initial_state = model.state_dict()
+    model.eval()
+
+    for t_inference in [0.0, 1.0, 20.0, 1000.0, 1e5]:
+        # Reset the model to its initial state.
+        model.load_state_dict(initial_state)
+        # Apply drift to the weights.
+        model.drift_analog_weights(t_inference)
+
+        # Setup counter of images predicted to 0.
+        predicted_ok = 0
+        total_images = 0
+
+        for images, labels in val_set:
+            # Predict image.
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+
+            pred = model(images)
+
+            _, predicted = torch.max(pred.data, 1)
+            total_images += labels.size(0)
+            predicted_ok += (predicted == labels).sum().item()
+
+        print("Number Of Images Tested at t={} = {}".format(t_inference, total_images))
+        print("Model Accuracy at t={} = {}".format(t_inference, predicted_ok / total_images))
+
+    print("\nFinal Number Of Images Tested = {}".format(total_images))
+    print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
 def main():
     """Train a PyTorch analog model with the MNIST dataset."""
@@ -261,8 +329,9 @@ def main():
     test_evaluation(model, validation_dataset)
     analog_model = convert_to_analog(model, rpu_config)
     test_evaluation(analog_model, validation_dataset)
-    #train(analog_model, train_dataset, "0.2300284672271867_7_multipliers.pth", "-0.17908795726111681_8_multipliers.pth")
+    #train(analog_model, train_dataset, POS_WEIGHTS_PTH, NEG_WEIGHTS_PTH)
     test_evaluation_future(analog_model, validation_dataset)
+    test_evaluation_future(analog_model, validation_dataset, POS_WEIGHTS_PTH, NEG_WEIGHTS_PTH)
 
 if __name__ == "__main__":
     # Execute only if run as the entry point into the program.
