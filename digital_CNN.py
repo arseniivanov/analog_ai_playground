@@ -33,7 +33,7 @@ import random
 import copy
 
 from lib_digital import create_sgd_optimizer_digital, load_digital_model, load_images
-from config import DEVICE
+from config import DEVICE, MODEL_PATH, DEVICE, PATH_DATASET
 
 # Training parameters.
 EPOCHS = 20
@@ -100,7 +100,7 @@ def differential_quantization(model, bins, preset=False):
         delta_pos = preset[0]
         delta_neg = preset[1]
     print(delta_pos, delta_neg)
-    adjusted_model = adjust_model_weights_to_bins(model, delta_pos, delta_neg).to("cuda")
+    adjusted_model = adjust_model_weights_to_bins(model, delta_pos, delta_neg).to(DEVICE)
     print(adjusted_model)
     return adjusted_model, delta_pos, delta_neg
 
@@ -419,23 +419,29 @@ def construct_multipliers(model, pos_bins, neg_bins, pos_multipliers_dict, neg_m
                 for idx, w in enumerate(flattened_weights):
                     closest_value = quantize_weight(w.item(), combined_bins)
                     
-                    # Determine which bin the closest_value belongs to and store its index (multiplier)
                     if closest_value in pos_bins:
-                        pos_multipliers.view(-1)[idx] = pos_bins.index(closest_value) + 1  # +1 to account for zero-based index
+                        pos_multipliers.view(-1)[idx] = pos_bins.index(closest_value) + 1
                     elif closest_value in neg_bins:
-                        neg_multipliers.view(-1)[idx] = neg_bins.index(closest_value) + 1  # +1 to account for zero-based index
+                        neg_multipliers.view(-1)[idx] = neg_bins.index(closest_value) + 1
+                    else:
+                        # it's a combined value
+                        for p in pos_bins:
+                            for n in neg_bins:
+                                if abs(closest_value - (p + n)) < 1e-6:
+                                    pos_multipliers.view(-1)[idx] = pos_bins.index(p) + 1
+                                    neg_multipliers.view(-1)[idx] = neg_bins.index(n) + 1
+                                    break
 
                 # Store the multiplier matrices in the dictionaries
                 pos_multipliers_dict[name] = pos_multipliers
                 neg_multipliers_dict[name] = neg_multipliers
-    return pos_multipliers_dict, neg_multipliers_dict
 
 TEST = 1
 
 def main():
     """Train a PyTorch analog model with the MNIST dataset."""
     # Load datasets.
-    train_dataset, validation_dataset = load_images()
+    train_dataset, validation_dataset = load_images(PATH_DATASET, 64)
 
     model = load_digital_model()
 
@@ -446,9 +452,10 @@ def main():
         # Evaluate the trained model.
         test_evaluation(model, validation_dataset)
 
-        torch.save(model.state_dict(), 'model_checkpoint.pth')
+        torch.save(model.state_dict(), os.path.join(MODEL_PATH, 'model_checkpoint.pth'))
     
-    model.load_state_dict(torch.load('model_checkpoint.pth', map_location="cuda"))
+    model.load_state_dict(torch.load(os.path.join(MODEL_PATH, 'model_checkpoint.pth'), map_location=DEVICE))
+    model.to(DEVICE)
 
     test_evaluation(model, validation_dataset)
 
@@ -463,7 +470,7 @@ def main():
     
     simplified_weights = construct_weight_matrix_and_histogram(quantized_model, pos_bins, neg_bins)
 
-    torch.save(model.state_dict(), 'quantized_mnist.pth')
+    torch.save(model.state_dict(), os.path.join(MODEL_PATH, 'quantized_mnist.pth'))
 
     pos_multipliers_dict = {}
     neg_multipliers_dict = {}
@@ -472,17 +479,17 @@ def main():
     # Save the multiplier dictionaries as .pth files
     concatenated_pos = torch.cat([torch.flatten(tensor) for tensor in pos_multipliers_dict.values()])
     concatenated_neg = torch.cat([torch.flatten(tensor) for tensor in neg_multipliers_dict.values()])
+    import pdb;pdb.set_trace()
 
     # Find the maximum value in the concatenated tensor
     largest_multiplier_pos = torch.max(concatenated_pos).item()
     largest_multiplier_neg = torch.max(concatenated_neg).item()
 
-    torch.save(pos_multipliers_dict, f"{pos_bins[0]}_{largest_multiplier_pos}_multipliers.pth")
-    torch.save(neg_multipliers_dict, f"{neg_bins[0]}_{largest_multiplier_neg}_multipliers.pth")
+    pos_file_name = f"{pos_bins[0]}_{largest_multiplier_pos}_multipliers.pth"
+    neg_file_name = f"{neg_bins[0]}_{largest_multiplier_neg}_multipliers.pth"
 
-
-
-
+    torch.save(pos_multipliers_dict, os.path.join(MODEL_PATH, pos_file_name))
+    torch.save(neg_multipliers_dict, os.path.join(MODEL_PATH, neg_file_name))
 
 if __name__ == "__main__":
     # Execute only if run as the entry point into the program.
