@@ -22,7 +22,7 @@ from typing import Optional, Type
 PATH_DATASET = os.path.join("data", "DATASET")
 
 # Training parameters.
-EPOCHS = 4
+EPOCHS = 15
 BATCH_SIZE = 64
 DEVICE = torch.device("cpu")
 
@@ -111,7 +111,7 @@ def create_sgd_optimizer(model, lr):
 
     return optimizer
 
-def train(model, train_set, pos_multipliers_file, neg_multipliers_file, epsilon=1e-1):
+def train(model, train_set, epsilon=1e-1):
     """Train the network.
 
     Args:
@@ -121,17 +121,7 @@ def train(model, train_set, pos_multipliers_file, neg_multipliers_file, epsilon=
     classifier = nn.NLLLoss()
     lr = 0.01
     optimizer = create_sgd_optimizer(model, lr)
-    scheduler = StepLR(optimizer, step_size=40, gamma=0.5)
-
-    pos_multipliers_dict = torch.load(pos_multipliers_file, map_location="cpu")
-    neg_multipliers_dict = torch.load(neg_multipliers_file, map_location="cpu")
-
-    # Extract initial factors from filenames
-    
-    pos_factor = float(pos_multipliers_file.split("_")[0])
-    neg_factor = float(neg_multipliers_file.split("_")[0])
-
-    print("Initial multipliers: ", pos_factor, " | ", neg_factor)
+    scheduler = StepLR(optimizer, step_size=6, gamma=0.5)
 
     time_init = time()
     for epoch_number in range(EPOCHS):
@@ -144,37 +134,12 @@ def train(model, train_set, pos_multipliers_file, neg_multipliers_file, epsilon=
             # Add training Tensor to the model (input).
             output = model(images)
             loss = classifier(output, labels)
-            penalty = 0.0
-            for param in model.parameters():
-                penalty += torch.sum((epsilon - torch.abs(param)) * (torch.abs(param) < epsilon))
             
-            loss = loss + penalty
             # Run training (backward propagation).
             loss.backward()
 
-            # Constraint: Keep integer multiples constant, allow factors to be optimized
-            for name, param in model.named_parameters():
-                if name in pos_multipliers_dict:  # Assuming names match
-                    pos_multiples = pos_multipliers_dict[name]
-                    neg_multiples = neg_multipliers_dict[name]
-                    
-                    grad_data = param.grad.data
-                    
-                    # Update factors based on gradients
-                    pos_factor -= lr * (grad_data * (pos_multiples * pos_factor)).sum() / pos_multiples.numel()
-                    neg_factor -= lr * (grad_data * (neg_multiples * neg_factor)).sum() / neg_multiples.numel()
-                    
-                    # Update the actual weights from multipliers and updated factors
-                    new_weight_data = pos_multiples * pos_factor + neg_multiples * neg_factor
-                    param.data.copy_(new_weight_data)
-
             # Optimize weights.
             optimizer.step()
-
-            for module in model.modules():
-                if isinstance(module, BitSlicedLinear):
-                    consolidated_weights = module.get_consolidated_weights()
-                    module.transfer_weights(consolidated_weights)
 
             total_loss += loss.item()
 
@@ -182,9 +147,11 @@ def train(model, train_set, pos_multipliers_file, neg_multipliers_file, epsilon=
         
         # Decay learning rate if needed.
         scheduler.step()
-
-    print("Final multipliers: ", pos_factor, " | ", neg_factor)
+        
     print("\nTraining Time (s) = {}".format(time() - time_init))
+    state_dict = model.state_dict()
+    torch.save(state_dict, 'analog_aware_model.pth')
+
 
 def test_evaluation(model, val_set):
     """Test trained network
@@ -214,7 +181,7 @@ def test_evaluation(model, val_set):
     print("\nFinal Number Of Images Tested = {}".format(total_images))
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
-def test_evaluation_future(model, val_set, pos_multipliers_file, neg_multipliers_file):
+def test_evaluation_future(model, val_set):
     """Test trained network
 
     Args:
@@ -329,9 +296,9 @@ def main():
     test_evaluation(model, validation_dataset)
     analog_model = convert_to_analog(model, rpu_config)
     test_evaluation(analog_model, validation_dataset)
-    #train(analog_model, train_dataset, POS_WEIGHTS_PTH, NEG_WEIGHTS_PTH)
+    train(analog_model, train_dataset)
     test_evaluation_future(analog_model, validation_dataset)
-    test_evaluation_future(analog_model, validation_dataset, POS_WEIGHTS_PTH, NEG_WEIGHTS_PTH)
+    #test_evaluation_future(analog_model, validation_dataset, POS_WEIGHTS_PTH, NEG_WEIGHTS_PTH)
 
 if __name__ == "__main__":
     # Execute only if run as the entry point into the program.

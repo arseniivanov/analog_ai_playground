@@ -1,13 +1,15 @@
-Digitally trained Quantization aware MNIST predictor:
+Analog:
 
-Epoch 0 - Training loss: 0.3078459253006462
-Epoch 1 - Training loss: 0.1445338542598969
-Epoch 2 - Training loss: 0.1115071307411040
-Epoch 3 - Training loss: 0.1074524323592759
-Epoch 4 - Training loss: 0.0853214341368197
-
-Training Time (s) = 53.84724020957947
+Number Of Images Tested at t=0.0 = 10000
+Model Accuracy at t=0.0 = 0.9627
+Number Of Images Tested at t=1.0 = 10000
+Model Accuracy at t=1.0 = 0.9675
+Number Of Images Tested at t=20.0 = 10000
+Model Accuracy at t=20.0 = 0.9636
+Number Of Images Tested at t=1000.0 = 10000
+Model Accuracy at t=1000.0 = 0.9572
+Number Of Images Tested at t=100000.0 = 10000
+Model Accuracy at t=100000.0 = 0.9537
 
 Final Number Of Images Tested = 10000
-Final Model Accuracy = 0.9719
-
+Final Model Accuracy = 0.9537
