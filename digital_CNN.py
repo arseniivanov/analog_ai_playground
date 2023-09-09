@@ -27,20 +27,13 @@ import numpy as np
 # Imports from PyTorch.
 import torch
 from torch import nn
-from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
-from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 import random
 import copy
 
-# Check device
-
-USE_CUDA = 1
-DEVICE = torch.device("cuda" if USE_CUDA else "cpu")
-
-# Path where the datasets will be stored.
-PATH_DATASET = os.path.join("data", "DATASET")
+from lib_digital import create_sgd_optimizer_digital, load_digital_model, load_images
+from config import DEVICE
 
 # Training parameters.
 EPOCHS = 20
@@ -295,57 +288,6 @@ def optimize_bins_strict_multiplicative(weights, pos_bins, neg_bins, iterations=
     
     return pos_bins, neg_bins
 
-
-def load_images():
-    """Load images for train from the torchvision datasets."""
-    transform = transforms.Compose([transforms.ToTensor()])
-
-    # Load the images.
-    train_set = datasets.MNIST(PATH_DATASET, download=True, train=True, transform=transform)
-    val_set = datasets.MNIST(PATH_DATASET, download=True, train=False, transform=transform)
-    train_data = torch.utils.data.DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
-    validation_data = torch.utils.data.DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=True)
-
-    return train_data, validation_data
-
-def create_analog_network():
-# Modify the original model to use the custom layers
-    model = nn.Sequential(
-        # 1st Convolutional Layer
-        #DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1), 4),
-        nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=3, stride=3, padding=1),
-
-        # 2nd Convolutional Layer
-        #DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1), 4),
-        nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2, padding=1),
-
-        # Flattening before passing to dense layers
-        nn.Flatten(),
-
-        # 1st Dense Layer
-        #DifferentialQuantizedLayerV2(nn.Linear(192,10), 2),
-        nn.Linear(192,10),
-        nn.LogSoftmax(dim=1)
-    )
-    if USE_CUDA:
-        model.cuda()
-    return model
-
-def create_sgd_optimizer(model, lr):
-    """Create the analog-aware optimizer.
-
-    Args:
-        model (nn.Module): model to be trained.
-    Returns:
-        nn.Module: optimizer
-    """
-    optimizer = SGD(model.parameters(), lr=lr)
-    return optimizer
-
 def train(model, train_set, epsilon=1e-1):
     """Train the network.
 
@@ -355,7 +297,7 @@ def train(model, train_set, epsilon=1e-1):
     """
     classifier = nn.NLLLoss()
     lr = 0.1
-    optimizer = create_sgd_optimizer(model, lr)
+    optimizer = create_sgd_optimizer_digital(model, lr)
     scheduler = StepLR(optimizer, step_size=10, gamma=0.3)
     model.train()
 
@@ -495,7 +437,7 @@ def main():
     # Load datasets.
     train_dataset, validation_dataset = load_images()
 
-    model = create_analog_network()
+    model = load_digital_model()
 
     if not TEST:
         # Train the model.

@@ -6,7 +6,6 @@ import torch
 from torch import nn
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
-from tiling import BitSlicedLinear
 
 # Imports from aihwkit.
 from aihwkit.nn import AnalogLinear, AnalogSequential
@@ -16,100 +15,16 @@ from aihwkit.inference import PCMLikeNoiseModel, GlobalDriftCompensation
 from aihwkit.simulator.rpu_base import cuda
 from aihwkit.nn.conversion import convert_to_analog
 
-from torch import Tensor
-from typing import Optional, Type
-
-PATH_DATASET = os.path.join("data", "DATASET")
+from lib_digital import load_digital_model, load_images, create_identity_input
+from lib_analog import digital_to_analog, create_sgd_optimizer_analog
+from config import DEVICE
 
 # Training parameters.
 EPOCHS = 15
 BATCH_SIZE = 64
-DEVICE = torch.device("cpu")
 
 POS_WEIGHTS_PTH = "0.2300284672271867_7_multipliers.pth"
 NEG_WEIGHTS_PTH = "-0.17908795726111681_8_multipliers.pth"
-
-def load_digital_model():
-# Modify the original model to use the custom layers
-    model = nn.Sequential(
-        # 1st Convolutional Layer
-        #DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1), 4),
-        nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, stride=1),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=3, stride=3, padding=1),
-
-        # 2nd Convolutional Layer
-        #DifferentialQuantizedLayerV2(nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1), 4),
-        nn.Conv2d(in_channels=8, out_channels=12, kernel_size=3, stride=1),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2, padding=1),
-
-        # Flattening before passing to dense layers
-        nn.Flatten(),
-
-        # 1st Dense Layer
-        #DifferentialQuantizedLayerV2(nn.Linear(192,10), 2),
-        nn.Linear(192,10),
-        nn.LogSoftmax(dim=1)
-    )
-    return model
-
-def load_images():
-    """Load images for train from the torchvision datasets."""
-    transform = transforms.Compose([transforms.ToTensor()])
-
-    # Load the images.
-    train_set = datasets.MNIST(PATH_DATASET, download=True, train=True, transform=transform)
-    val_set = datasets.MNIST(PATH_DATASET, download=True, train=False, transform=transform)
-    train_data = torch.utils.data.DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
-    validation_data = torch.utils.data.DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=True)
-
-    return train_data, validation_data
-
-def digital_to_analog(model):
-    """Create the neural network using analog and digital layers.
-
-    Args:
-        input_size (int): size of the Tensor at the input.
-        hidden_sizes (list): list of sizes of the hidden layers (2 layers).
-        output_size (int): size of the Tensor at the output.
-
-    Returns:
-        nn.Module: created analog model
-    """
-    rpu_config = InferenceRPUConfig()
-    rpu_config.forward.out_res = -1.0  # Turn off (output) ADC discretization.
-    rpu_config.forward.w_noise_type = WeightNoiseType.ADDITIVE_CONSTANT
-    rpu_config.forward.w_noise = 0.02  # Short-term w-noise.
-
-    rpu_config.clip.type = WeightClipType.FIXED_VALUE
-    rpu_config.clip.fixed_value = 1.0
-    rpu_config.modifier.pdrop = 0.03  # Drop connect.
-    rpu_config.modifier.type = WeightModifierType.ADD_NORMAL  # Fwd/bwd weight noise.
-    rpu_config.modifier.std_dev = 0.1
-    rpu_config.modifier.rel_to_actual_wmax = True
-
-    # Inference noise model.
-    rpu_config.noise_model = PCMLikeNoiseModel(g_max=25.0)
-
-    # drift compensation
-    rpu_config.drift_compensation = GlobalDriftCompensation()
-    model.load_state_dict(torch.load('quantized_mnist.pth', map_location="cpu"))
-
-    return model, rpu_config
-
-def create_sgd_optimizer(model, lr):
-    """Create the analog-aware optimizer.
-
-    Args:
-        model (nn.Module): model to be trained.
-    Returns:
-        nn.Module: optimizer
-    """
-    optimizer = AnalogSGD(model.parameters(), lr=lr)
-    optimizer.regroup_param_groups(model)
-
-    return optimizer
 
 def train(model, train_set, epsilon=1e-1):
     """Train the network.
@@ -120,7 +35,7 @@ def train(model, train_set, epsilon=1e-1):
     """
     classifier = nn.NLLLoss()
     lr = 0.01
-    optimizer = create_sgd_optimizer(model, lr)
+    optimizer = create_sgd_optimizer_analog(model, lr)
     scheduler = StepLR(optimizer, step_size=6, gamma=0.5)
 
     time_init = time()
@@ -218,16 +133,6 @@ def test_evaluation_future(model, val_set):
 
     print("\nFinal Number Of Images Tested = {}".format(total_images))
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
-
-def create_identity_input(layer):
-    if isinstance(layer, torch.nn.Conv2d):
-        # For Conv2d, creating an identity matrix is non-trivial.
-        # You might want to pass a specific kind of tensor here.
-        return torch.ones((1, layer.in_channels, layer.kernel_size[0], layer.kernel_size[1]))
-    elif isinstance(layer, torch.nn.Linear):
-        return torch.eye(layer.in_features)
-    else:
-        return None
 
 def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_multipliers_file):
     """Test trained network
