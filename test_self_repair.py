@@ -1,4 +1,5 @@
 import torch
+import matplotlib.pyplot as plt
 
 import os
 
@@ -7,7 +8,6 @@ from lib_analog import prepare_digital_to_analog, convert_to_analog_step, DriftM
 from config import DEVICE, MODEL_PATH, PATH_DATASET, POS_WEIGHTS_PTH, NEG_WEIGHTS_PTH, POS_FACTOR, NEG_FACTOR
 
 def reset_weights_to_nearest_multiplier(layer, layer_name, pos_multipliers_dict, neg_multipliers_dict, pos_factor, neg_factor):
-    import pdb;pdb.set_trace()
     with torch.no_grad():
         pos_multipliers = pos_multipliers_dict[layer_name]
         neg_multipliers = neg_multipliers_dict[layer_name]
@@ -35,6 +35,31 @@ def calculate_accuracy(model, val_set):
         predicted_ok += (predicted == labels).sum().item()
     return predicted_ok / total_images, total_images
 
+def plot_accuracies(times, accuracies):
+    plt.figure(figsize=(10, 6))
+    # Loop through the data and plot accordingly
+    last_t = None
+    last_acc = None
+
+    for i in range(len(times)):
+        t = times[i]
+        acc = accuracies[i]
+        
+        if i > 0:
+            linestyle = '--' if last_t == t else '-'
+            color = 'r' if last_t == t else 'b'
+            plt.plot([last_t, t], [last_acc, acc], linestyle=linestyle, color=color, marker='o')
+        
+        last_t = t
+        last_acc = acc
+
+    plt.xlabel('Time (t)')
+    plt.ylabel('Accuracy')
+    plt.title('Model Accuracy Over Time with Adjustments')
+    plt.grid(True)
+    plt.show()
+
+
 def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_multipliers_file):
     """Test trained network
 
@@ -42,9 +67,12 @@ def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_mul
         model (nn.Model): Trained model to be evaluated
         val_set (DataLoader): Validation set to perform the evaluation
     """
+
+    times = []
+    accuracies = []
+
     # Save initial state of the model for resetting before each drift operation.
     pos_multipliers_dict = torch.load(pos_multipliers_file, map_location=DEVICE)
-    import pdb;pdb.set_trace()
     neg_multipliers_dict = torch.load(neg_multipliers_file, map_location=DEVICE)
 
     drift_monitor = DriftMonitor(model)
@@ -53,6 +81,12 @@ def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_mul
     #We do not want to reset the weights
     #initial_state = model.state_dict()
     model.eval()
+
+    accuracy, total_images = calculate_accuracy(model, val_set)
+    print("Model Accuracy at initialization = {}".format(accuracy))
+    times.append(0)
+    accuracies.append(accuracy)
+
     multiple = 600
 
     for t_inference in range(1,7):
@@ -66,6 +100,8 @@ def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_mul
 
         print("Number Of Images Tested at t={} = {}".format(t_inference*multiple, total_images))
         print("Model Accuracy at t={} = {}".format(t_inference*multiple, accuracy))
+        times.append(t_inference*multiple)
+        accuracies.append(accuracy)
         
         # Check for drift
         drifted_layers = drift_monitor.check_drift(threshold=1e-6)
@@ -74,7 +110,7 @@ def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_mul
         for layer_name, metrics in drifted_layers.items():
             print(f"Layer {layer_name} - Total Drift: {metrics['total_drift']}, Normalized Drift: {metrics['normalized_drift']}")
                 
-            if metrics['normalized_drift'] > 0.10:
+            if metrics['normalized_drift'] > 0.05:
                 print(f"Resetting weights for Layer {layer_name} due to excessive drift.")
                 layer = dict(model.named_children())[layer_name]
                 reset_weights_to_nearest_multiplier(layer, layer_name, pos_multipliers_dict, neg_multipliers_dict, POS_FACTOR, NEG_FACTOR)
@@ -83,6 +119,10 @@ def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_mul
         if reset:
             accuracy, total_images = calculate_accuracy(model, val_set)
             print("Model Accuracy after reset = {}".format(accuracy))
+            times.append(t_inference*multiple)
+            accuracies.append(accuracy)
+
+    plot_accuracies(times, accuracies)
 
 def main():
     """Train a PyTorch analog model with the MNIST dataset."""
