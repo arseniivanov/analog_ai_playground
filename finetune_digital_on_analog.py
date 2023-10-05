@@ -15,12 +15,12 @@ from aihwkit.inference import PCMLikeNoiseModel, GlobalDriftCompensation
 from aihwkit.simulator.rpu_base import cuda
 from aihwkit.nn.conversion import convert_to_analog
 
-from lib_digital import load_digital_model, load_images, create_identity_input
-from lib_analog import digital_to_analog, create_sgd_optimizer_analog
-from config import DEVICE
+from lib_digital import load_digital_model, load_images, calculate_accuracy, plot_accuracies
+from lib_analog import prepare_digital_to_analog, create_sgd_optimizer_analog
+from config import DEVICE, PATH_DATASET, MODEL_PATH
 
 # Training parameters.
-EPOCHS = 15
+EPOCHS = 9
 BATCH_SIZE = 64
 
 POS_WEIGHTS_PTH = "0.2300284672271867_7_multipliers.pth"
@@ -97,107 +97,38 @@ def test_evaluation(model, val_set):
     print("Final Model Accuracy = {}".format(predicted_ok / total_images))
 
 def test_evaluation_future(model, val_set):
-    """Test trained network
-
-    Args:
-        model (nn.Model): Trained model to be evaluated
-        val_set (DataLoader): Validation set to perform the evaluation
-    """
-    # Save initial state of the model for resetting before each drift operation.
-    initial_state = model.state_dict()
     model.eval()
-
-    for t_inference in [0.0, 1.0, 20.0, 1000.0, 1e5]:
-        # Reset the model to its initial state.
-        model.load_state_dict(initial_state)
-        # Apply drift to the weights.
-        model.drift_analog_weights(t_inference)
-
-        # Setup counter of images predicted to 0.
-        predicted_ok = 0
-        total_images = 0
-
-        for images, labels in val_set:
-            # Predict image.
-            images = images.to(DEVICE)
-            labels = labels.to(DEVICE)
-
-            pred = model(images)
-
-            _, predicted = torch.max(pred.data, 1)
-            total_images += labels.size(0)
-            predicted_ok += (predicted == labels).sum().item()
-
-        print("Number Of Images Tested at t={} = {}".format(t_inference, total_images))
-        print("Model Accuracy at t={} = {}".format(t_inference, predicted_ok / total_images))
-
-    print("\nFinal Number Of Images Tested = {}".format(total_images))
-    print("Final Model Accuracy = {}".format(predicted_ok / total_images))
-
-def test_evaluation_self_repairing(model, val_set, pos_multipliers_file, neg_multipliers_file):
-    """Test trained network
-
-    Args:
-        model (nn.Model): Trained model to be evaluated
-        val_set (DataLoader): Validation set to perform the evaluation
-    """
-    # Save initial state of the model for resetting before each drift operation.
-    pos_multipliers_dict = torch.load(pos_multipliers_file, map_location="cpu")
-    neg_multipliers_dict = torch.load(neg_multipliers_file, map_location="cpu")
-
-    # Extract initial factors from filenames
+    times = []
+    accuracies = []
+    multiple = 300
+    timesteps = 20
     
-    pos_factor = float(pos_multipliers_file.split("_")[0])
-    neg_factor = float(neg_multipliers_file.split("_")[0])
+    initial_accuracy, _ = calculate_accuracy(model, val_set)
+    print(f"Model Accuracy at initialization = {initial_accuracy}")
+    times.append(0)
+    accuracies.append(initial_accuracy)
 
-    # Dictionary to store initial values
-    initial_values = {}
+    for t_inference in range(1, timesteps+1):
+        model.drift_analog_weights(multiple)
+        accuracy, total_images = calculate_accuracy(model, val_set)
+        print(f"Number Of Images Tested at t={t_inference*multiple} = {total_images}")
+        print(f"Model Accuracy at t={t_inference*multiple} = {accuracy}")
+        
+        times.append(t_inference * multiple)
+        accuracies.append(accuracy)
 
-    model.eval()
-    with torch.no_grad():
-        for name, layer in model.named_children():
-            id_input = create_identity_input(layer)
-            if id_input is not None:
-                x = layer(id_input)
-                initial_values[name] = x.clone()
-
-    initial_state = model.state_dict()
-    model.eval()
-
-    for t_inference in [0.0, 1.0, 20.0, 1000.0, 1e5]:
-        # Reset the model to its initial state.
-        model.load_state_dict(initial_state)
-        # Apply drift to the weights.
-        model.drift_analog_weights(t_inference)
-
-        # Setup counter of images predicted to 0.
-        predicted_ok = 0
-        total_images = 0
-
-        for images, labels in val_set:
-            # Predict image.
-            images = images.to(DEVICE)
-            labels = labels.to(DEVICE)
-
-            pred = model(images)
-
-            _, predicted = torch.max(pred.data, 1)
-            total_images += labels.size(0)
-            predicted_ok += (predicted == labels).sum().item()
-
-        print("Number Of Images Tested at t={} = {}".format(t_inference, total_images))
-        print("Model Accuracy at t={} = {}".format(t_inference, predicted_ok / total_images))
-
-    print("\nFinal Number Of Images Tested = {}".format(total_images))
-    print("Final Model Accuracy = {}".format(predicted_ok / total_images))
+    print(f"\nFinal Number Of Images Tested = {total_images}")
+    print(f"Final Model Accuracy = {accuracy}")
+    
+    plot_accuracies(times, accuracies)
 
 def main():
     """Train a PyTorch analog model with the MNIST dataset."""
     # Load datasets.
-    train_dataset, validation_dataset = load_images()
-
+    train_dataset, validation_dataset = load_images(PATH_DATASET, BATCH_SIZE)
+    path = os.path.join(MODEL_PATH, "quantized_mnist.pth")
     model = load_digital_model()
-    model, rpu_config = digital_to_analog(model)
+    model, rpu_config = prepare_digital_to_analog(model, path)
     test_evaluation(model, validation_dataset)
     analog_model = convert_to_analog(model, rpu_config)
     test_evaluation(analog_model, validation_dataset)

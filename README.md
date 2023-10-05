@@ -1,15 +1,5 @@
-Analog:
+This repo is the base of experimentation for the paper https://arxiv.org/abs/2310.00337
 
-Number Of Images Tested at t=0.0 = 10000
-Model Accuracy at t=0.0 = 0.9627
-Number Of Images Tested at t=1.0 = 10000
-Model Accuracy at t=1.0 = 0.9675
-Number Of Images Tested at t=20.0 = 10000
-Model Accuracy at t=20.0 = 0.9636
-Number Of Images Tested at t=1000.0 = 10000
-Model Accuracy at t=1000.0 = 0.9572
-Number Of Images Tested at t=100000.0 = 10000
-Model Accuracy at t=100000.0 = 0.9537
+**Abstract**
 
-Final Number Of Images Tested = 10000
-Final Model Accuracy = 0.9537
+In recent years, hardware-accelerated neural networks have gained significant attention for edge computing applications. Among various hardware options, crossbar arrays, offer a promising avenue for efficient storage and manipulation of neural network weights. However, the transition from trained floating-point models to hardware-constrained analog architectures remains a challenge. In this work, we combine a quantization technique specifically designed for such architectures with a novel self-correcting mechanism. By utilizing dual crossbar connections to represent both the positive and negative parts of a single weight, we develop an algorithm to approximate a set of multiplicative weights. These weights, along with their differences, aim to represent the original network's weights with minimal loss in performance. We implement the models using IBM's aihwkit and evaluate their efficacy over time. Our results demonstrate that, when paired with an on-chip pulse generator, our self-correcting neural network performs comparably to those trained with analog-aware algorithms. 
